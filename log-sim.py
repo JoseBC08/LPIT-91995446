@@ -7,7 +7,7 @@ import re
 import argparse
 import configparser
 
-version = "1.01"
+version = "1.02"
 
 # NOTES:
 # - \033[F = Moves the cursor up one line
@@ -81,6 +81,7 @@ def main():
 
             len_input = rawgencount(inp_log_file)
             print("- Input log file: " + inp_log_file + " (" + str(len_input) + " lines)")
+            print("- Output log file: " + out_log_file)
             print("")
 
             while True:
