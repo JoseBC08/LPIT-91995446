@@ -1,0 +1,14 @@
+# Ignorar el entorno virtual
+.venv/
+
+# Ignorar archivos de registro (Logs) pesados
+*.log
+Code/cu-lan-ho.log
+Data/cu-lan-ho.log
+
+# Ignorar carpetas de caché de Python
+__pycache__/
+*.pyc
+
+# Ignorar archivos temporales de Jupyter
+.ipynb_checkpoints/
