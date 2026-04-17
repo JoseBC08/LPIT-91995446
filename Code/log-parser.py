@@ -34,7 +34,20 @@ SDAP_DL_REGEX = re.compile(
     r".*?pdu_len=(?P<pdu_len>\d+)"
 
 )
- 
+
+PLMN_REGEX = re.compile(
+    r"plmn\s*=\s*(?P<plmn>\d{5,6})|"
+    r"mcc\s*=\s*(?P<mcc>\d{3}).*?mnc\s*=\s*(?P<mnc>\d{2,3})",
+    re.IGNORECASE,
+)
+
+RNTI_REGEX = re.compile(
+    r"(?:c[-_ ]?rnti|rnti)\s*=\s*(?P<rnti>0x[0-9a-fA-F]+|\d+)",
+    re.IGNORECASE,
+)
+
+PCI_REGEX = re.compile(r"pci\s*=\s*(?P<pci>\d+)", re.IGNORECASE)
+
 # ============================================================
 
 # Cola compartida
@@ -55,6 +68,12 @@ raw_df = pl.DataFrame(
 
         "pdu_len": pl.Int64,
 
+        "plmn": pl.Utf8,
+
+        "rnti": pl.Utf8,
+
+        "pci": pl.Int64,
+
     }
 
 )
@@ -70,6 +89,12 @@ agg_df = pl.DataFrame(
         "ue": pl.Int64,
 
         "bytes_sum": pl.Int64,
+
+        "plmn": pl.Utf8,
+
+        "rnti": pl.Utf8,
+
+        "pci": pl.Int64,
 
     }
 
@@ -87,10 +112,16 @@ latest_plot_df = pl.DataFrame(
 
         "bytes_sum": pl.Int64,
 
+        "plmn": pl.Utf8,
+
+        "rnti": pl.Utf8,
+
+        "pci": pl.Int64,
+
     }
 
 )
- 
+
 # Para no volver a agregar segundos ya procesados
 
 last_processed_bucket = None
@@ -101,7 +132,7 @@ def parse_sdap_dl_line(line: str):
 
     Si la línea corresponde a un mensaje SDAP DL con pdu_len,
 
-    devuelve un diccionario con ts, ue y pdu_len.
+    devuelve un diccionario con ts, ue, pdu_len, plmn, rnti y pci.
 
     Si no, devuelve None.
 
@@ -118,6 +149,36 @@ def parse_sdap_dl_line(line: str):
     ue = int(match.group("ue"))
 
     pdu_len = int(match.group("pdu_len"))
+
+    plmn = None
+
+    m = PLMN_REGEX.search(line)
+
+    if m:
+
+        if m.group("plmn"):
+
+            plmn = m.group("plmn")
+
+        else:
+
+            plmn = f"{m.group('mcc')}{m.group('mnc')}"
+
+    rnti = None
+
+    m = RNTI_REGEX.search(line)
+
+    if m:
+
+        rnti = m.group("rnti")
+
+    pci = None
+
+    m = PCI_REGEX.search(line)
+
+    if m:
+
+        pci = int(m.group("pci"))
  
     return {
 
@@ -126,6 +187,12 @@ def parse_sdap_dl_line(line: str):
         "ue": ue,
 
         "pdu_len": pdu_len,
+
+        "plmn": plmn,
+
+        "rnti": rnti,
+
+        "pci": pci,
 
     }
  
@@ -249,7 +316,17 @@ async def aggregator():
 
             tmp.group_by(["bucket_ts", "ue"])
 
-               .agg(pl.col("pdu_len").sum().alias("bytes_sum"))
+               .agg(
+
+                   pl.col("pdu_len").sum().alias("bytes_sum"),
+
+                   pl.col("plmn").last().alias("plmn"),
+
+                   pl.col("rnti").last().alias("rnti"),
+
+                   pl.col("pci").last().alias("pci"),
+
+               )
 
                .sort(["bucket_ts", "ue"])
 
@@ -325,6 +402,8 @@ app.layout = html.Div([
 
     dcc.Graph(id="live-graph"),
 
+    html.Div(id="live-metadata", style={"marginTop": "24px"}),
+
     dcc.Interval(id="interval", interval=1000, n_intervals=0),
 
 ])
@@ -333,6 +412,8 @@ app.layout = html.Div([
 
     Output("live-graph", "figure"),
 
+    Output("live-metadata", "children"),
+
     Input("interval", "n_intervals"),
 
 )
@@ -340,7 +421,7 @@ app.layout = html.Div([
 def update_graph(n):
 
     fig = go.Figure()
- 
+
     if latest_plot_df.height == 0:
 
         fig.update_layout(
@@ -354,13 +435,67 @@ def update_graph(n):
         )
 
         return fig
- 
-    ues = sorted(latest_plot_df["ue"].unique().to_list())
- 
+
+    df = latest_plot_df.sort(["bucket_ts", "ue"])
+
+    # Rango temporal global completo
+
+    start_ts = df["bucket_ts"].min()
+
+    end_ts = df["bucket_ts"].max()
+
+    full_time = pl.DataFrame({
+
+        "bucket_ts": pl.datetime_range(
+
+            start=start_ts,
+
+            end=end_ts,
+
+            interval="1s",
+
+            eager=True
+
+        )
+
+    })
+
+    # Lista de UEs existentes
+
+    ue_df = pl.DataFrame({
+
+        "ue": sorted(df["ue"].unique().to_list())
+
+    })
+
+    # Producto cartesiano: todos los segundos x todas las UEs
+
+    full_grid = full_time.join(ue_df, how="cross")
+
+    # Join con los datos reales y relleno de huecos con 0
+
+    df_full = (
+
+        full_grid.join(df, on=["bucket_ts", "ue"], how="left")
+
+        .with_columns(
+
+            pl.col("bytes_sum").fill_null(0)
+
+        )
+
+        .sort(["ue", "bucket_ts"])
+
+    )
+
+    # Dibujar una serie por UE
+
+    ues = sorted(df_full["ue"].unique().to_list())
+
     for ue in ues:
 
-        df_ue = latest_plot_df.filter(pl.col("ue") == ue).sort("bucket_ts")
- 
+        df_ue = df_full.filter(pl.col("ue") == ue).sort("bucket_ts")
+
         fig.add_trace(
 
             go.Scatter(
@@ -376,7 +511,7 @@ def update_graph(n):
             )
 
         )
- 
+
     fig.update_layout(
 
         title="Evolución temporal del volumen agregado por UE",
@@ -388,8 +523,38 @@ def update_graph(n):
         legend_title="UE",
 
     )
- 
-    return fig
+
+    # Construir tabla de metadatos por UE con los últimos valores conocidos
+    latest_info = (
+        df.sort(["ue", "bucket_ts"])
+          .group_by("ue")
+          .agg(
+              pl.col("plmn").last().alias("plmn"),
+              pl.col("rnti").last().alias("rnti"),
+              pl.col("pci").last().alias("pci"),
+          )
+          .sort("ue")
+    )
+
+    metadata_table = html.Table([
+        html.Thead(html.Tr([
+            html.Th("UE"),
+            html.Th("PLMN"),
+            html.Th("RNTI"),
+            html.Th("PCI"),
+        ])),
+        html.Tbody([
+            html.Tr([
+                html.Td(str(int(row["ue"]))),
+                html.Td(row["plmn"] or "-"),
+                html.Td(row["rnti"] or "-"),
+                html.Td(str(row["pci"]) if row["pci"] is not None else "-"),
+            ])
+            for row in latest_info.iter_rows(named=True)
+        ])
+    ], style={"width": "100%", "borderCollapse": "collapse"})
+
+    return fig, metadata_table
  
 # ============================================================
 
