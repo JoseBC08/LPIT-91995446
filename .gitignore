@@ -12,3 +12,6 @@ __pycache__/
 
 # Ignorar archivos temporales de Jupyter
 .ipynb_checkpoints/
+
+# Ignorar los archivos .parquet
+Code/*.parquet
